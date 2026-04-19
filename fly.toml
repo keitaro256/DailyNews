@@ -1,7 +1,7 @@
 # fly.toml — SỬA `app` thành tên app của bạn (viết thường, gạch ngang)
 # Tạo bằng lệnh: flyctl launch --no-deploy   (sẽ tự sinh file này, sau đó chép đè bằng file này)
 
-app = "newsreader-CHANGE-ME"
+app = "DailyNews"
 primary_region = "sin"   # Singapore — gần VN nhất
 
 [build]
