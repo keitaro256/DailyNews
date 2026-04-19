@@ -159,6 +159,24 @@ def delete_vocab(vid):
 def get_available_dates():
     with conn() as c: return [r['date'] for r in c.execute('SELECT DISTINCT date FROM articles ORDER BY date DESC LIMIT 60').fetchall()]
 
+def get_hot_week(end_date: str, limit: int = 10):
+    """Return top N hot articles across the 7-day window ending at end_date.
+    Hotness = higher importance, then newer. Only 'international' category by default."""
+    try:
+        end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+    except Exception:
+        end_dt = datetime.now()
+    start_dt = end_dt - timedelta(days=6)
+    start_s = start_dt.strftime('%Y-%m-%d')
+    end_s = end_dt.strftime('%Y-%m-%d')
+    with conn() as c:
+        rows = c.execute(
+            '''SELECT * FROM articles
+               WHERE date BETWEEN ? AND ?
+               ORDER BY importance DESC, fetched_at DESC, id DESC
+               LIMIT ?''', (start_s, end_s, limit)).fetchall()
+    return [dict(r) for r in rows]
+
 def log_fetch(date, sno, status, count=0, error=None):
     with conn() as c: c.execute('INSERT INTO fetch_log(date,session_no,status,articles_added,error) VALUES(?,?,?,?,?)',(date,sno,status,count,error))
 
