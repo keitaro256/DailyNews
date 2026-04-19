@@ -5,9 +5,6 @@ from socketserver import ThreadingMixIn
 from datetime import datetime, timedelta
 
 # ── Timezone: luôn chạy theo giờ Việt Nam (UTC+7) ──────────────────────────
-# Quan trọng khi deploy lên cloud (Linux mặc định UTC), để scheduler
-# 23:50 / 06:00 / 12:00 / 18:00 đúng giờ VN.
-# Có thể override qua env var APP_TZ (ví dụ APP_TZ=Asia/Ho_Chi_Minh).
 if hasattr(_time, 'tzset'):
     os.environ['TZ'] = os.environ.get('APP_TZ', 'Asia/Ho_Chi_Minh')
     _time.tzset()
@@ -166,6 +163,7 @@ body{font-family:'Be Vietnam Pro',sans-serif;background:var(--bg);color:var(--te
 .rb .vocab-note{background:rgba(239,68,68,.45);border-radius:3px;padding:0 2px;color:#fecaca;border-bottom:2px solid #ef4444;}
 .rb .pv .vocab-hl{background:rgba(250,204,21,.3);color:#fef08a;}
 .rb .pv .vocab-note{background:rgba(239,68,68,.4);color:#fecaca;border-bottom:2px solid #ef4444;}
+.rb .vocab-num{font-size:9px;font-weight:700;vertical-align:super;margin-left:2px;opacity:.85;letter-spacing:.3px;}
 
 .vp{display:none;position:fixed;z-index:1001;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:7px;box-shadow:var(--shadow);}
 .vp.open{display:flex;gap:5px;}
@@ -423,64 +421,120 @@ function renderReader(data,artCat){
   const vocWords=voc.filter(v=>v.article_url===rUrl);
   const isVN=artCat==='vietnam';
   let h='';
-  // Show fallback notice if applicable
   if(data.fallback_msg)h+=`<div style="background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:12px;color:var(--orange);">⚠️ ${esc(data.fallback_msg)}</div>`;
   if(data.images&&data.images.length>0)h+=`<img src="${esc(data.images[0].src)}" alt="" onerror="this.style.display='none'">`;
   const paras=data.paragraphs||[];
   const parasVi=data.paragraphs_vi||[];
+  // Global counter so each highlight cluster has a unique number across the whole article
+  let clusterNum=0;
   for(let i=0;i<paras.length;i++){
     const p=paras[i]||{};
     const vi=parasVi[i]||null;
     const pText=p.text||'';
     const tag=p.tag||'p';
     const hd=(tag==='h2'||tag==='h3')?' style="font-weight:700;font-size:16px;margin-top:14px;"':'';
-    let enHtml=esc(pText);
-    let viHtml=vi?esc(vi.text||''):'';
-    // Highlight vocab words in BOTH English and Vietnamese
-    for(const v of vocWords){
-      const w=escRe(v.original_text);
-      if(w.length<2)continue;
-      const re=new RegExp('('+w+')','gi');
-      const hlClass=v.type==='note'?'vocab-note':'vocab-hl';
-      const tip=esc(v.translated_text||v.original_text||'');
-      enHtml=enHtml.replace(re,`<span class="${hlClass}" title="${tip}">$1</span>`);
-      if(viHtml){
-        // Also try to highlight translated text in Vietnamese paragraph
-        if(v.translated_text){
-          const wv=escRe(v.translated_text);
-          if(wv.length>=2){
-            const rev=new RegExp('('+wv+')','gi');
-            viHtml=viHtml.replace(rev,`<span class="${hlClass}" title="${esc(v.original_text)}">$1</span>`);
-          }
-        }
-        // Also highlight original text if it appears in Vietnamese text
-        viHtml=viHtml.replace(re,`<span class="${hlClass}" title="${tip}">$1</span>`);
-      }
-    }
-    // Vietnamese articles: only show original text, no bilingual
+    // Only vocab entries that were saved FROM this paragraph (or legacy -1 = unknown → show everywhere)
+    const paraVocabs=vocWords.filter(v=>{
+      const pi=(v.paragraph_index==null)?-1:v.paragraph_index;
+      return pi===i||pi===-1;
+    });
+    // Assign a number to each vocab entry in this paragraph
+    const numbered=paraVocabs.map(v=>({...v, _num: ++clusterNum}));
+    const enHtml=hlText(esc(pText), numbered, false);
+    const viHtml=vi?hlText(esc(vi.text||''), numbered, true):'';
     if(isVN){
-      h+=`<div class="pr"><div class="pe"${hd}>${enHtml}</div></div>`;
+      h+=`<div class="pr" data-pi="${i}"><div class="pe"${hd}>${enHtml}</div></div>`;
     }else{
-      h+=`<div class="pr"><div class="pe"${hd}>${enHtml}</div>${viHtml?`<div class="pv">${viHtml}</div>`:''}</div>`;
+      h+=`<div class="pr" data-pi="${i}"><div class="pe"${hd}>${enHtml}</div>${viHtml?`<div class="pv">${viHtml}</div>`:''}</div>`;
     }
   }
   h+=`<div style="margin-top:18px;padding-top:12px;border-top:1px solid var(--border);text-align:center;"><a href="${esc(data.url||rUrl)}" target="_blank" style="color:var(--accent2);font-size:12px;">🔗 Mở bài gốc</a></div>`;
   document.getElementById('rB').innerHTML=h;
+}
+
+// Highlight helper: position-based, no nesting, first-occurrence per vocab.
+// text: HTML-escaped plain text. vocabs: list with _num. useTranslated: highlight translated_text (for Vietnamese version).
+function hlText(text, vocabs, useTranslated){
+  if(!vocabs.length)return text;
+  const matches=[];
+  for(const v of vocabs){
+    const rawWord=useTranslated?(v.translated_text||''):(v.original_text||'');
+    if(!rawWord||rawWord.trim().length<2)continue;
+    // Escape the search word and also escape it the same way as the text
+    const escWord=esc(rawWord.trim());
+    const re=new RegExp(escRe(escWord),'i');
+    const m=text.match(re);
+    if(m&&m.index>=0){
+      matches.push({start:m.index, end:m.index+m[0].length, vocab:v});
+    }
+  }
+  if(!matches.length)return text;
+  // Sort by position; drop overlaps (keep earliest)
+  matches.sort((a,b)=>a.start-b.start);
+  const clean=[];let lastEnd=0;
+  for(const m of matches){
+    if(m.start>=lastEnd){clean.push(m);lastEnd=m.end;}
+  }
+  // Build output
+  let out='';let pos=0;
+  for(const m of clean){
+    out+=text.substring(pos,m.start);
+    const cls=m.vocab.type==='note'?'vocab-note':'vocab-hl';
+    const tip=esc(m.vocab.translated_text||m.vocab.original_text||'');
+    out+=`<span class="${cls}" title="${tip}">${text.substring(m.start,m.end)}<sup class="vocab-num">[${m.vocab._num}]</sup></span>`;
+    pos=m.end;
+  }
+  out+=text.substring(pos);
+  return out;
 }
 function escRe(s){return s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');}
 function cr(){document.getElementById('ro').classList.remove('open');rUrl='';}
 function crBg(e){if(e.target===document.getElementById('ro'))cr();}
 
 // Vocab selection
+let selPi=-1;  // paragraph index of the current selection
 document.addEventListener('mouseup',e=>{
   const sel=window.getSelection().toString().trim(),pp=document.getElementById('vPop');
   if(sel&&sel.length>0&&sel.length<500&&document.getElementById('ro').classList.contains('open')){
-    selTxt=sel;pp.style.left=e.clientX+'px';pp.style.top=(e.clientY-46)+'px';pp.classList.add('open');
+    selTxt=sel;
+    // Walk up from the selection anchor to find the .pr element with data-pi
+    selPi=-1;
+    try{
+      let node=window.getSelection().anchorNode;
+      while(node&&node!==document.body){
+        if(node.nodeType===1&&node.getAttribute&&node.getAttribute('data-pi')!=null){
+          selPi=parseInt(node.getAttribute('data-pi'));break;
+        }
+        node=node.parentNode;
+      }
+    }catch(err){selPi=-1;}
+    pp.style.left=e.clientX+'px';pp.style.top=(e.clientY-46)+'px';pp.classList.add('open');
   }else{pp.classList.remove('open');}
+});
+// Touch support for mobile
+document.addEventListener('touchend',e=>{
+  setTimeout(()=>{
+    const sel=window.getSelection().toString().trim(),pp=document.getElementById('vPop');
+    if(sel&&sel.length>0&&sel.length<500&&document.getElementById('ro').classList.contains('open')){
+      selTxt=sel;selPi=-1;
+      try{
+        let node=window.getSelection().anchorNode;
+        while(node&&node!==document.body){
+          if(node.nodeType===1&&node.getAttribute&&node.getAttribute('data-pi')!=null){
+            selPi=parseInt(node.getAttribute('data-pi'));break;
+          }
+          node=node.parentNode;
+        }
+      }catch(err){selPi=-1;}
+      const t=e.changedTouches&&e.changedTouches[0];
+      if(t){pp.style.left=t.clientX+'px';pp.style.top=(t.clientY-60)+'px';}
+      pp.classList.add('open');
+    }
+  },10);
 });
 async function svV(vt){
   if(!selTxt)return;document.getElementById('vPop').classList.remove('open');
-  try{const r=await fetch('/api/vocab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({date:cD,text:selTxt,type:'translate',url:rUrl,title:document.getElementById('rT').textContent})});
+  try{const r=await fetch('/api/vocab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({date:cD,text:selTxt,type:'translate',url:rUrl,title:document.getElementById('rT').textContent,paragraph_index:selPi})});
     const d=await r.json();toast(`Đã lưu từ vựng: "${d.translated}"`,'success');
     await loadDay();
     if(contentCache[rUrl]){const artObj=arts.find(x=>x.url===rUrl);renderReader(contentCache[rUrl],artObj?artObj.category:'international');}
@@ -494,10 +548,8 @@ async function saveNote_sel(){
   const updated=noteText+newEntry;
   document.getElementById('notesArea').value=updated;
   try{
-    // Save note text
     await fetch('/api/notes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({date:cD,content:updated})});
-    // Also save as vocab entry type 'note' for red highlighting
-    await fetch('/api/vocab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({date:cD,text:selTxt,type:'note',url:rUrl,title:artTitle})});
+    await fetch('/api/vocab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({date:cD,text:selTxt,type:'note',url:rUrl,title:artTitle,paragraph_index:selPi})});
     toast('Đã ghi chú (highlight đỏ)','success');
     await loadDay();
     if(contentCache[rUrl]){const artObj=arts.find(x=>x.url===rUrl);renderReader(contentCache[rUrl],artObj?artObj.category:'international');}
@@ -565,15 +617,12 @@ function toast(m,t='success'){const el=document.getElementById('toast');el.textC
 class Handler(BaseHTTPRequestHandler):
     def log_message(self,f,*a):pass
 
-    # ── Xác thực HTTP Basic Auth ──────────────────────────────────────────
-    # Ưu tiên lấy user/pass từ env var (AUTH_USER / AUTH_PASS), fallback
-    # sang config.json. Nếu cả hai đều rỗng → tắt xác thực (phát triển local).
     def _auth_ok(self):
         cfg = load_config()
         user = os.environ.get('AUTH_USER') or cfg.get('auth_user', '')
         pw   = os.environ.get('AUTH_PASS') or cfg.get('auth_pass', '')
         if not user or not pw:
-            return True  # Chưa cấu hình → cho qua (dùng ở mạng LAN riêng)
+            return True
         hdr = self.headers.get('Authorization', '')
         if not hdr.startswith('Basic '):
             return False
@@ -585,7 +634,6 @@ class Handler(BaseHTTPRequestHandler):
             return False
 
     def _require_auth(self):
-        """Gửi response 401 yêu cầu đăng nhập. Trả True nếu đã chặn."""
         if self._auth_ok():
             return False
         body = b'Unauthorized'
@@ -625,7 +673,8 @@ a{{color:#818cf8;}}h2.pe,h3.pe{{font-weight:700;font-size:18px;margin-top:18px;}
 .vocab-hl{{background:rgba(250,204,21,.35);border-radius:3px;padding:0 2px;color:#fef9c3;}}
 .vocab-note{{background:rgba(239,68,68,.45);border-radius:3px;padding:0 2px;color:#fecaca;border-bottom:2px solid #ef4444;}}
 .pv .vocab-hl{{background:rgba(250,204,21,.3);color:#fef08a;}}
-.pv .vocab-note{{background:rgba(239,68,68,.4);color:#fecaca;border-bottom:2px solid #ef4444;}}</style></head>
+.pv .vocab-note{{background:rgba(239,68,68,.4);color:#fecaca;border-bottom:2px solid #ef4444;}}
+.vocab-num{{font-size:9px;font-weight:700;vertical-align:super;margin-left:2px;opacity:.85;letter-spacing:.3px;}}</style></head>
 <body><div id="c"><div class="loading">⏳ Đang tải và dịch bài viết...</div></div>
 <script>
 const artCat="{cat}";
@@ -636,10 +685,11 @@ async function load(){{
     const r=await fetch('/api/reader?url='+encodeURIComponent(url));
     const d=await r.json();
     if(!d.success)throw new Error(d.error||'Lỗi');
-    // Load vocab for highlighting
+    // Load vocab for highlighting — use today's date properly (previously a template string bug sent the literal JS code)
     let vocWords=[];
     try{{
-      const vr=await fetch('/api/day?date=new Date().toISOString().slice(0,10)');
+      const today=new Date().toISOString().slice(0,10);
+      const vr=await fetch('/api/day?date='+today);
       const vd=await vr.json();
       vocWords=(vd.vocab||[]).filter(v=>v.article_url===url);
     }}catch(ve){{}}
@@ -647,23 +697,17 @@ async function load(){{
     if(d.images&&d.images[0])h+='<img src="'+esc(d.images[0].src)+'" onerror="this.style.display=\\'none\\'">';
     const ps=d.paragraphs||[],vs=d.paragraphs_vi||[];
     const isVN=artCat==='vietnam';
+    let clusterNum=0;
     for(let i=0;i<ps.length;i++){{
       const p=ps[i]||{{}},v=vs[i]||null;
       const hd=(p.tag==='h2'||p.tag==='h3')?'h2':'div';
-      let enHtml=esc(p.text||'');
-      let viHtml=v?esc(v.text||''):'';
-      for(const vc of vocWords){{
-        const w=escRe(vc.original_text);
-        if(w.length<2)continue;
-        const re=new RegExp('('+w+')','gi');
-        const hlClass=vc.type==='note'?'vocab-note':'vocab-hl';
-        enHtml=enHtml.replace(re,'<span class="'+hlClass+'">$1</span>');
-        if(viHtml&&vc.translated_text){{
-          const wv=escRe(vc.translated_text);
-          if(wv.length>=2)viHtml=viHtml.replace(new RegExp('('+wv+')','gi'),'<span class="'+hlClass+'">$1</span>');
-        }}
-        if(viHtml)viHtml=viHtml.replace(re,'<span class="'+hlClass+'">$1</span>');
-      }}
+      const paraVocabs=vocWords.filter(vc=>{{
+        const pi=(vc.paragraph_index==null)?-1:vc.paragraph_index;
+        return pi===i||pi===-1;
+      }});
+      const numbered=paraVocabs.map(vc=>({{...vc, _num: ++clusterNum}}));
+      const enHtml=hlText(esc(p.text||''), numbered, false);
+      const viHtml=v?hlText(esc(v.text||''), numbered, true):'';
       if(isVN){{
         h+='<div class="pr"><'+hd+' class="pe">'+enHtml+'</'+hd+'></div>';
       }}else{{
@@ -680,6 +724,32 @@ async function load(){{
 }}
 function esc(s){{return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}}
 function escRe(s){{return s.replace(/[.*+?^${{}}()|[\\]\\\\]/g,'\\\\$&');}}
+function hlText(text, vocabs, useTranslated){{
+  if(!vocabs.length)return text;
+  const matches=[];
+  for(const v of vocabs){{
+    const rawWord=useTranslated?(v.translated_text||''):(v.original_text||'');
+    if(!rawWord||rawWord.trim().length<2)continue;
+    const escWord=esc(rawWord.trim());
+    const re=new RegExp(escRe(escWord),'i');
+    const m=text.match(re);
+    if(m&&m.index>=0)matches.push({{start:m.index,end:m.index+m[0].length,vocab:v}});
+  }}
+  if(!matches.length)return text;
+  matches.sort((a,b)=>a.start-b.start);
+  const clean=[];let lastEnd=0;
+  for(const m of matches){{if(m.start>=lastEnd){{clean.push(m);lastEnd=m.end;}}}}
+  let out='';let pos=0;
+  for(const m of clean){{
+    out+=text.substring(pos,m.start);
+    const cls=m.vocab.type==='note'?'vocab-note':'vocab-hl';
+    const tip=esc(m.vocab.translated_text||m.vocab.original_text||'');
+    out+='<span class="'+cls+'" title="'+tip+'">'+text.substring(m.start,m.end)+'<sup class="vocab-num">['+m.vocab._num+']</sup></span>';
+    pos=m.end;
+  }}
+  out+=text.substring(pos);
+  return out;
+}}
 load();
 </script></body></html>'''
             self._html(reader_html)
@@ -811,11 +881,13 @@ load();
             b=self._body();db.save_note(b['date'],b['content']);self._json({'ok':True})
         elif path=='/api/vocab':
             b=self._body();text=b.get('text','');vt=b.get('type','translate');date=b.get('date',datetime.now().strftime('%Y-%m-%d'))
+            try: pi=int(b.get('paragraph_index', -1))
+            except: pi=-1
             translated=''
             if vt in ('translate','note'):
                 try:translated=translator.translate(text)
                 except:translated=text
-            vid=db.save_vocab(date,text,translated,vt,b.get('url',''),b.get('title',''))
+            vid=db.save_vocab(date,text,translated,vt,b.get('url',''),b.get('title',''),pi)
             self._json({'id':vid,'translated':translated})
         elif path=='/api/rate':
             b=self._body();db.update_article_importance(b['id'],b['importance']);self._json({'ok':True})
