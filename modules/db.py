@@ -64,6 +64,8 @@ def init_db():
             except: pass
         try: c.execute("ALTER TABLE vocabulary ADD COLUMN date TEXT DEFAULT ''")
         except: pass
+        try: c.execute("ALTER TABLE vocabulary ADD COLUMN paragraph_index INTEGER DEFAULT -1")
+        except: pass
         try: c.execute("CREATE TABLE IF NOT EXISTS article_cache (url TEXT PRIMARY KEY, content_json TEXT NOT NULL, cached_at TEXT DEFAULT CURRENT_TIMESTAMP)")
         except: pass
 
@@ -138,10 +140,10 @@ def save_note(date, content):
         c.execute('INSERT INTO notes(date,content,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) ON CONFLICT(date) DO UPDATE SET content=excluded.content,updated_at=excluded.updated_at',(date,content))
 
 # ── Vocabulary ────────────────────────────────────────────────────────────────
-def save_vocab(date, original, translated, vtype, url, title):
+def save_vocab(date, original, translated, vtype, url, title, paragraph_index=-1):
     with conn() as c:
-        c.execute('INSERT INTO vocabulary(date,original_text,translated_text,type,article_url,article_title) VALUES(?,?,?,?,?,?)',
-                  (date, original, translated, vtype, url, title))
+        c.execute('INSERT INTO vocabulary(date,original_text,translated_text,type,article_url,article_title,paragraph_index) VALUES(?,?,?,?,?,?,?)',
+                  (date, original, translated, vtype, url, title, paragraph_index))
         return c.execute('SELECT last_insert_rowid()').fetchone()[0]
 
 def get_vocab_by_date(date):
