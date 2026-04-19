@@ -1,0 +1,27 @@
+# fly.toml — SỬA `app` thành tên app của bạn (viết thường, gạch ngang)
+# Tạo bằng lệnh: flyctl launch --no-deploy   (sẽ tự sinh file này, sau đó chép đè bằng file này)
+
+app = "newsreader-CHANGE-ME"
+primary_region = "sin"   # Singapore — gần VN nhất
+
+[build]
+
+[env]
+  APP_TZ = "Asia/Ho_Chi_Minh"
+
+[http_service]
+  internal_port = 8765
+  force_https = true
+  # CỰC KỲ QUAN TRỌNG: không cho máy tự tắt, nếu không scheduler sẽ không chạy
+  auto_stop_machines = false
+  auto_start_machines = false
+  min_machines_running = 1
+
+[[mounts]]
+  source = "newsreader_data"
+  destination = "/app/data"
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1

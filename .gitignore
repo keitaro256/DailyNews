@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Runtime data — KHÔNG commit database
+data/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Local config with secrets (nếu bạn tạo file riêng)
+config.local.json

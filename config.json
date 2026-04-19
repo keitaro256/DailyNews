@@ -1,0 +1,13 @@
+{
+  "extra_fetches": [
+    "06:00",
+    "12:00",
+    "18:00"
+  ],
+  "auto_translate": true,
+  "keep_days": 30,
+  "port": 8765,
+  "articles_per_topic_per_fetch": 3,
+  "auth_user": "",
+  "auth_pass": ""
+}
