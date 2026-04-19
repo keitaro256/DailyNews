@@ -1,5 +1,6 @@
 """app.py v4.3 - Multi-threaded, preload, notes highlight"""
-import json, os, sys, urllib.parse, traceback, base64, time as _time
+import json, os, sys, urllib.parse, traceback, base64, time as _time, threading
+from concurrent.futures import ThreadPoolExecutor
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from datetime import datetime, timedelta
@@ -14,6 +15,48 @@ from modules import db, fetcher, translator, exporter
 from modules.scheduler import Scheduler, load_config, save_config
 
 db.init_db()
+
+def _preload_one(url: str):
+    """Fetch + translate a single article and save to cache. Idempotent."""
+    if not url: return
+    try:
+        if db.get_cached_content(url):
+            return  # Already cached, skip
+        content = fetcher.fetch_article_content(url)
+        paras = content.get('paragraphs') or []
+        clean_paras = [{'text': p['text'], 'tag': p.get('tag','p')}
+                       for p in paras if isinstance(p, dict) and p.get('text')]
+        if not clean_paras:
+            return
+        title = (content.get('title') or '').lower()
+        if 'google' in title[:20] or 'search' in title[:20]:
+            return  # garbage page
+        content['paragraphs'] = clean_paras
+        try:
+            vi = translator.translate_paragraphs(clean_paras, max_workers=6)
+            content['paragraphs_vi'] = vi if vi and len(vi) == len(clean_paras) else [{'text':'','tag':'p'}] * len(clean_paras)
+        except Exception:
+            content['paragraphs_vi'] = [{'text':'','tag':'p'}] * len(clean_paras)
+        if content.get('success'):
+            db.save_cached_content(url, content)
+    except Exception:
+        pass
+
+def _preload_articles_bg(articles: list):
+    """Preload new articles in background: fetch content + parallel translate.
+    Uses 3 concurrent articles, each with up to 6 parallel paragraph translations."""
+    urls = [a.get('url','') for a in articles
+            if a.get('url') and a.get('category') == 'international']
+    urls = [u for u in urls if u]  # dedup happens in _preload_one via cache check
+    if not urls:
+        return
+    print(f"[Preload] Starting background preload for {len(urls)} articles...")
+    try:
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            list(ex.map(_preload_one, urls))
+        print(f"[Preload] Done.")
+    except Exception as e:
+        print(f"[Preload] Error: {e}")
 
 def do_fetch(date, label, cutoff_hour=None, count_per_topic=3, use_wayback=None):
     cfg = load_config()
@@ -33,6 +76,9 @@ def do_fetch(date, label, cutoff_hour=None, count_per_topic=3, use_wayback=None)
         db.log_fetch(date, sno, 'success', added)
         wb_tag = ' [Wayback]' if use_wayback else ''
         print(f"[Fetch] {date} #{sno} '{label}'{wb_tag}: {added} bài")
+        # Trigger backend preload in background (non-blocking)
+        if added > 0 and cfg.get('auto_preload', True):
+            threading.Thread(target=_preload_articles_bg, args=(articles,), daemon=True).start()
         return added
     except Exception as e:
         db.log_fetch(date, sno, 'error', 0, str(e))
@@ -221,6 +267,7 @@ body{font-family:'Be Vietnam Pro',sans-serif;background:var(--bg);color:var(--te
 
 <div class="tabs">
   <div class="tab active" data-tab="dashboard" onclick="sTab('dashboard')">📊 Dashboard</div>
+  <div class="tab" data-tab="hotweek" onclick="sTab('hotweek')">🔥 Tin hot tuần</div>
   <div class="tab" data-tab="intl" onclick="sTab('intl')">🌍 Quốc tế</div>
   <div class="tab" data-tab="vn" onclick="sTab('vn')">🇻🇳 Việt Nam</div>
   <div class="tab" data-tab="vocab" onclick="sTab('vocab')">📝 Từ vựng</div>
@@ -233,6 +280,14 @@ body{font-family:'Be Vietnam Pro',sans-serif;background:var(--bg);color:var(--te
     <div class="dg" id="dS"></div><div id="dC"></div>
     <h3 style="margin:14px 0 8px;color:var(--text2);font-size:14px;">🔥 Tin nổi bật</h3>
     <div id="dH"></div>
+  </div>
+  <div class="panel" id="panel-hotweek">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
+      <h3 style="color:var(--text2);font-size:14px;">🔥 10 tin hot nhất 7 ngày qua (tính đến ngày đang chọn)</h3>
+      <button class="btn btn-sm btn-p" onclick="loadHotWeek()">🔄 Làm mới</button>
+    </div>
+    <p style="font-size:11px;color:var(--text3);margin-bottom:12px;">Xếp hạng theo độ quan trọng (★) rồi đến thời gian. Bấm 👍/👎 ở các tab khác để nâng/giảm hạng.</p>
+    <div id="hotWeekList"><p style="color:var(--text3);text-align:center;padding:36px;">Đang tải...</p></div>
   </div>
   <div class="panel" id="panel-intl"><div id="intlA"></div></div>
   <div class="panel" id="panel-vn"><div id="vnA"></div></div>
@@ -306,7 +361,49 @@ function uDD(){
   }
 }
 
-function sTab(n){document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===n));document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('active',p.id==='panel-'+n));}
+function sTab(n){document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===n));document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('active',p.id==='panel-'+n));if(n==='hotweek')loadHotWeek();}
+
+async function loadHotWeek(){
+  const el=document.getElementById('hotWeekList');
+  el.innerHTML='<p style="color:var(--text3);text-align:center;padding:24px;">Đang tải...</p>';
+  try{
+    const r=await fetch('/api/week_hot?date='+cD+'&limit=10');
+    const d=await r.json();
+    const list=d.articles||[];
+    if(!list.length){el.innerHTML='<p style="color:var(--text3);text-align:center;padding:36px;">Chưa có dữ liệu trong 7 ngày qua.</p>';return;}
+    // Make them clickable in the reader
+    arts=arts.concat(list.filter(a=>!arts.find(x=>x.id===a.id)));
+    let h='';
+    list.forEach((a,idx)=>{
+      const imp=a.importance||3,stars='★'.repeat(imp)+'☆'.repeat(5-imp),cat=a.category==='international'?'🌍':'🇻🇳';
+      const rank=idx+1;
+      const rankColor=idx<3?'var(--red)':(idx<6?'var(--orange)':'var(--text2)');
+      const desc=a.description||'';
+      const descVi=a.description_vi||'';
+      const showDesc=a.category==='international'?(descVi||desc):desc;
+      h+=`<div class="ac"><div style="display:flex;gap:10px;align-items:flex-start;">
+        <div style="font-size:20px;font-weight:800;color:${rankColor};min-width:34px;">#${rank}</div>
+        <div style="flex:1;">
+          <div class="ti">${cat} ${esc(a.title)}</div>
+          ${a.title_vi&&a.category==='international'?`<div class="tv">→ ${esc(a.title_vi)}</div>`:''}
+          ${showDesc?`<div class="de">${esc(showDesc).slice(0,300)}</div>`:''}
+          <div class="meta">
+            <span class="src">${esc(a.source||'')}</span>
+            <span class="stars">${stars}</span>
+            <span style="color:var(--text3);">${a.date||''}</span>
+            <div class="acts">
+              <button onclick="openArt(${a.id})">📖 Đọc</button>
+              <button onclick="rate(${a.id},${Math.min(5,imp+1)});setTimeout(loadHotWeek,300)">👍</button>
+              <button onclick="rate(${a.id},${Math.max(1,imp-1)});setTimeout(loadHotWeek,300)">👎</button>
+              <button onclick="openLink(${a.id})">🔗</button>
+            </div>
+          </div>
+        </div>
+      </div></div>`;
+    });
+    el.innerHTML=h;
+  }catch(e){el.innerHTML='<p style="color:var(--red);text-align:center;padding:36px;">Lỗi tải: '+esc(e.message)+'</p>';}
+}
 
 async function loadDay(){
   try{const r=await fetch('/api/day?date='+cD),d=await r.json();arts=d.articles||[];voc=d.vocab||[];
@@ -316,10 +413,10 @@ async function loadDay(){
   }catch(e){toast('Lỗi: '+e.message,'error');}
 }
 
-// Pre-load article content in parallel (3 at a time)
+// Pre-load article content in parallel (5 at a time — backend now translates paragraphs in parallel so this is safe)
 async function preloadArticles(){
   const urls=arts.filter(a=>a.url&&!contentCache[a.url]).map(a=>a.url);
-  const batch=3;
+  const batch=5;
   for(let i=0;i<urls.length;i+=batch){
     const chunk=urls.slice(i,i+batch);
     await Promise.allSettled(chunk.map(async url=>{
@@ -571,8 +668,10 @@ async function fetchNow(){
   const el=document.getElementById('fs');el.textContent='Đang cập nhật...';el.classList.add('ld');
   try{const r=await fetch('/api/fetch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({date:cD})});
     const d=await r.json();el.textContent=`+${d.added}`;el.classList.remove('ld');
-    toast(d.added>0?`Cập nhật: ${d.added} bài`:(d.message||'Không có tin mới'),d.added>0?'success':'error');
-    loadDay();loadDates();
+    toast(d.added>0?`Cập nhật: ${d.added} bài — đang tải nội dung ngầm...`:(d.message||'Không có tin mới'),d.added>0?'success':'error');
+    await loadDay();await loadDates();
+    // Auto preload content + translations for new articles
+    if(d.added>0)preloadArticles();
   }catch(e){el.textContent='Lỗi';el.classList.remove('ld');toast('Lỗi','error');}
   setTimeout(()=>{el.textContent='Sẵn sàng';},5000);
 }
@@ -828,7 +927,7 @@ load();
             content['paragraphs'] = clean_paras
             if clean_paras:
                 try:
-                    vi = translator.translate_paragraphs(clean_paras)
+                    vi = translator.translate_paragraphs(clean_paras, max_workers=8)
                     content['paragraphs_vi'] = vi if vi and len(vi)==len(clean_paras) else [{'text':'','tag':'p'}]*len(clean_paras)
                 except:
                     content['paragraphs_vi'] = [{'text':'','tag':'p'}]*len(clean_paras)
@@ -840,6 +939,11 @@ load();
             self._json(content)
         elif path=='/api/config':self._json(load_config())
         elif path=='/api/dates':self._json(db.get_available_dates())
+        elif path=='/api/week_hot':
+            date=q.get('date',datetime.now().strftime('%Y-%m-%d'))
+            try: limit=int(q.get('limit',10))
+            except: limit=10
+            self._json({'articles': db.get_hot_week(date, limit=limit), 'end_date': date})
         elif path=='/api/export/excel':
             date=q.get('date',datetime.now().strftime('%Y-%m-%d'));a=db.get_articles(date);n=db.get_note(date);v=db.get_vocab_by_date(date);cfg=load_config()
             d=exporter.export_excel_day(a,n,date,cfg.get('port',8765),vocab=v);self._file(d,f'news_{date}.xlsx','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
